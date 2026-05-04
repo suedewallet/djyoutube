@@ -214,6 +214,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <div class="srwrap">
       <input type="text" id="searchQ" placeholder="Search YouTube..." onkeydown="if(event.key==='Enter')doSearch()"/>
       <button class="sbtn" onclick="doSearch()">SEARCH</button>
+      <button class="sbtn" id="apiKeyBtn" onclick="toggleApiPanel()" title="Set YouTube API key for search">⚙ API KEY</button>
       <div id="srRes"></div>
     </div>
   </div>
@@ -228,13 +229,24 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 <!-- ── AUDIO STATUS BAR ── -->
 <div class="audiobar">
   <span><b>MODE</b></span>
-  <span id="backendStatus" class="aok">PIPED API — NO BACKEND NEEDED</span>
+  <span id="backendStatus" class="aok">BROWSER-NATIVE</span>
   <span style="color:var(--mu2)">│</span>
   <span id="audioCtxStatus" class="aer">WEB AUDIO: OFF</span>
   <span style="color:var(--mu2)">│</span>
-  <span id="pipedStatus" style="color:var(--mu)">Piped: connecting…</span>
+  <span id="searchStatus" style="color:var(--ye)">SEARCH: checking…</span>
   <span style="color:var(--mu2)">│</span>
-  <span style="color:var(--mu)">100% browser-native · real EQ + FX + waveform + BPM · no server required</span>
+  <span id="pipedStatus" style="color:var(--mu)">Audio: checking…</span>
+</div>
+
+<!-- ── API KEY PANEL ── -->
+<div id="apiKeyPanel" style="display:none;background:var(--pan);border:1px solid var(--bd2);border-radius:6px;padding:8px 12px;display:none;align-items:center;gap:8px;flex-wrap:wrap;font-size:9px;color:var(--mu)">
+  <span><b style="color:var(--ye)">YouTube Data API v3 Key</b> — free from <a href="https://console.cloud.google.com/" target="_blank" style="color:var(--b)">console.cloud.google.com</a> · enables search</span>
+  <div style="display:flex;gap:5px;flex:1;min-width:240px">
+    <input type="text" id="apiKeyInput" placeholder="AIza..." style="flex:1;background:var(--bg);border:1px solid var(--bd2);border-radius:4px;color:var(--b);font-family:var(--mono);font-size:9px;padding:4px 8px;outline:none;min-width:0"/>
+    <button onclick="saveApiKey()" style="background:var(--p3);border:1px solid var(--gr);border-radius:4px;color:var(--gr);font-family:var(--mono);font-size:8px;padding:4px 10px;cursor:pointer;white-space:nowrap">SAVE</button>
+    <button onclick="clearApiKey()" style="background:var(--p3);border:1px solid var(--bd2);border-radius:4px;color:var(--mu);font-family:var(--mono);font-size:8px;padding:4px 10px;cursor:pointer;white-space:nowrap">CLEAR</button>
+  </div>
+  <span style="color:var(--mu2)">Key is stored locally in your browser only</span>
 </div>
 
 <!-- ── DECKS + MIXER ── -->
@@ -439,20 +451,16 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 
 <script>
 // ═══════════════════════════════════════════════════════
-// CONFIG — Piped API (no backend, no API key needed)
+// CONFIG
 // ═══════════════════════════════════════════════════════
-// Piped is an open-source YouTube proxy with a public JSON API.
-// We rotate through instances if one is down.
-// ═══════════════════════════════════════════════════════
-// CONFIG — Invidious (search) + Piped (audio streams)
-// Both are free, open, no API key needed
-// ═══════════════════════════════════════════════════════
+var YT_API_KEY = localStorage.getItem('ytmixer_apikey') || '';
+
 var INVIDIOUS_INSTANCES = [
   'https://inv.nadeko.net',
   'https://invidious.privacydev.net',
   'https://invidious.flokinet.to',
-  'https://vid.puffyan.us',
   'https://yt.artemislena.eu',
+  'https://invidious.nerdvpn.de',
 ];
 var PIPED_INSTANCES = [
   'https://pipedapi.kavin.rocks',
@@ -464,28 +472,54 @@ var PIPED_INSTANCES = [
 var INVIDIOUS = INVIDIOUS_INSTANCES[0];
 var PIPED = PIPED_INSTANCES[0];
 
-async function pickWorkingInstance(instances, testPath, label, statusSuffix){
-  for(var i=0;i<instances.length;i++){
-    try{
-      var r=await fetch(instances[i]+testPath,{signal:AbortSignal.timeout(4000)});
-      if(r.ok){
-        if(label==='inv') INVIDIOUS=instances[i];
-        else PIPED=instances[i];
-        document.getElementById('pipedStatus').textContent=label+': '+instances[i].replace('https://','')+(statusSuffix||'');
-        document.getElementById('pipedStatus').style.color='var(--gr)';
-        return true;
-      }
-    }catch(e){}
-  }
-  return false;
+function updateSearchStatus(){
+  var el=document.getElementById('searchStatus');
+  if(YT_API_KEY){ el.textContent='SEARCH: YouTube API ✓'; el.style.color='var(--gr)'; }
+  else { el.textContent='SEARCH: No API key — using Invidious'; el.style.color='var(--ye)'; }
+}
+
+function toggleApiPanel(){
+  var p=document.getElementById('apiKeyPanel');
+  var showing=p.style.display==='flex';
+  p.style.display=showing?'none':'flex';
+  if(!showing) document.getElementById('apiKeyInput').value=YT_API_KEY||'';
+}
+function clearApiKey(){
+  YT_API_KEY=''; localStorage.removeItem('ytmixer_apikey');
+  document.getElementById('apiKeyInput').value='';
+  updateSearchStatus();
+  toast('API key cleared','ok');
+}
+  var k=document.getElementById('apiKeyInput').value.trim();
+  YT_API_KEY=k;
+  if(k) localStorage.setItem('ytmixer_apikey',k);
+  else localStorage.removeItem('ytmixer_apikey');
+  document.getElementById('apiKeyPanel').style.display='none';
+  updateSearchStatus();
+  toast(k?'YouTube API key saved — search ready ✓':'API key cleared','ok');
 }
 
 async function initInstances(){
-  var invOk=await pickWorkingInstance(INVIDIOUS_INSTANCES,'/api/v1/trending','inv',' (search ready)');
-  if(!invOk){
-    document.getElementById('pipedStatus').textContent='Search: no instance found — paste URLs directly';
-    document.getElementById('pipedStatus').style.color='var(--ye)';
+  // Find a working Invidious for search fallback
+  var invOk=false;
+  for(var i=0;i<INVIDIOUS_INSTANCES.length;i++){
+    try{
+      var r=await fetch(INVIDIOUS_INSTANCES[i]+'/api/v1/trending',{signal:AbortSignal.timeout(4000)});
+      if(r.ok){ INVIDIOUS=INVIDIOUS_INSTANCES[i]; invOk=true; break; }
+    }catch(e){}
   }
+  // Find a working Piped for audio
+  var pipedOk=false;
+  for(var i=0;i<PIPED_INSTANCES.length;i++){
+    try{
+      var r2=await fetch(PIPED_INSTANCES[i]+'/trending?region=US',{signal:AbortSignal.timeout(4000)});
+      if(r2.ok){ PIPED=PIPED_INSTANCES[i]; pipedOk=true; break; }
+    }catch(e){}
+  }
+  var ps=document.getElementById('pipedStatus');
+  if(pipedOk||invOk){ ps.textContent='Audio: ready ('+(pipedOk?PIPED.replace('https://',''):INVIDIOUS.replace('https://',''))+')'; ps.style.color='var(--gr)'; }
+  else { ps.textContent='Audio: all instances unreachable'; ps.style.color='var(--re)'; }
+  updateSearchStatus();
 }
 initInstances();
 
@@ -1166,12 +1200,36 @@ async function doSearch(){
   var res=document.getElementById('srRes');
   res.innerHTML='<div style="padding:10px;font-size:9px;color:var(--mu);text-align:center;letter-spacing:.1em">SEARCHING...</div>';
   res.classList.add('show');
-  // Try each Invidious instance
+
+  // ── Primary: YouTube Data API v3 (if key set) ──
+  if(YT_API_KEY){
+    try{
+      var url='https://www.googleapis.com/youtube/v3/search?part=snippet&q='+encodeURIComponent(q)+'&maxResults=8&type=video&videoEmbeddable=true&key='+YT_API_KEY;
+      var r=await fetch(url,{signal:AbortSignal.timeout(6000)});
+      var data=await r.json();
+      if(data.error){ toast('YT API: '+data.error.message,'e'); }
+      else if(data.items&&data.items.length){
+        res.innerHTML='';
+        data.items.forEach(function(item){
+          var vid=item.id.videoId, title=item.snippet.title, ch=item.snippet.channelTitle, thumb=item.snippet.thumbnails.default.url;
+          var el=document.createElement('div'); el.className='sri';
+          el.innerHTML='<img class="sri-th" src="'+thumb+'" loading="lazy"/>'
+            +'<div class="sri-inf"><div class="sri-t">'+esc(title)+'</div><div class="sri-c">'+esc(ch)+'</div></div>'
+            +'<div class="sri-btns"><button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'A\',event)">▸A</button>'
+            +'<button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'B\',event)">▸B</button></div>';
+          res.appendChild(el);
+        });
+        return;
+      }
+    }catch(e){ console.warn('YT API search failed:',e.message); }
+  }
+
+  // ── Fallback: Invidious ──
   for(var i=0;i<INVIDIOUS_INSTANCES.length;i++){
     try{
-      var r=await fetch(INVIDIOUS_INSTANCES[i]+'/api/v1/search?q='+encodeURIComponent(q)+'&type=video&fields=videoId,title,author,lengthSeconds,videoThumbnails',{signal:AbortSignal.timeout(6000)});
-      if(!r.ok) continue;
-      var items=await r.json();
+      var r2=await fetch(INVIDIOUS_INSTANCES[i]+'/api/v1/search?q='+encodeURIComponent(q)+'&type=video&fields=videoId,title,author,lengthSeconds,videoThumbnails',{signal:AbortSignal.timeout(6000)});
+      if(!r2.ok) continue;
+      var items=await r2.json();
       if(!items||!items.length) continue;
       INVIDIOUS=INVIDIOUS_INSTANCES[i];
       res.innerHTML='';
@@ -1179,13 +1237,12 @@ async function doSearch(){
         var vid=item.videoId, title=item.title||'Unknown', ch=item.author||'';
         var dur=item.lengthSeconds>0?Math.floor(item.lengthSeconds/60)+':'+(item.lengthSeconds%60<10?'0':'')+item.lengthSeconds%60:'';
         var thumbs=item.videoThumbnails||[];
-        var thumb=thumbs.find(function(t){return t.quality==='medium';})||thumbs[0];
+        var thumb=(thumbs.find(function(t){return t.quality==='medium';})||thumbs[0]);
         var thumbUrl=thumb?thumb.url:('https://i.ytimg.com/vi/'+vid+'/mqdefault.jpg');
         if(thumbUrl&&thumbUrl.startsWith('/')) thumbUrl=INVIDIOUS_INSTANCES[i]+thumbUrl;
         var el=document.createElement('div'); el.className='sri';
         el.innerHTML='<img class="sri-th" src="'+thumbUrl+'" loading="lazy" onerror="this.src=\'https://i.ytimg.com/vi/'+vid+'/default.jpg\'"/>'
-          +'<div class="sri-inf"><div class="sri-t">'+esc(title)+'</div>'
-          +'<div class="sri-c">'+esc(ch)+(dur?' · '+dur:'')+'</div></div>'
+          +'<div class="sri-inf"><div class="sri-t">'+esc(title)+'</div><div class="sri-c">'+esc(ch)+(dur?' · '+dur:'')+'</div></div>'
           +'<div class="sri-btns"><button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'A\',event)">▸A</button>'
           +'<button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'B\',event)">▸B</button></div>';
         res.appendChild(el);
@@ -1193,7 +1250,7 @@ async function doSearch(){
       return;
     }catch(e){ console.warn('Invidious search failed:',INVIDIOUS_INSTANCES[i],e.message); }
   }
-  res.innerHTML='<div style="padding:10px;font-size:9px;color:var(--re);text-align:center">Search unavailable — paste a YouTube URL directly into the deck</div>';
+  res.innerHTML='<div style="padding:10px;font-size:9px;color:var(--re);text-align:center">Search unavailable — add a YouTube API key (⚙) or paste a URL directly</div>';
 }
 function pickDeck(vid,title,ch,d,e){ if(e)e.stopPropagation(); loadById(d,vid,title,ch); document.getElementById('srRes').classList.remove('show'); document.getElementById('searchQ').value=''; }
 function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
