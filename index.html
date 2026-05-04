@@ -477,11 +477,11 @@ function clearApiKey(){
   updateSearchStatus();
   toast('API key cleared','ok');
 }
+function saveApiKey(){
   var k=document.getElementById('apiKeyInput').value.trim();
   YT_API_KEY=k;
   if(k) localStorage.setItem('ytmixer_apikey',k);
   else localStorage.removeItem('ytmixer_apikey');
-  document.getElementById('apiKeyPanel').style.display='none';
   updateSearchStatus();
   toast(k?'YouTube API key saved — search ready ✓':'API key cleared','ok');
 }
