@@ -306,7 +306,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
   <div class="eqrow">
     <div class="kw"><div class="kl">HI</div><div class="knob" data-d="A" data-eq="hi" data-v="75"><div class="ktick"></div></div><div class="kd" id="eA-hi">+0dB</div></div>
     <div class="kw"><div class="kl">MID</div><div class="knob" data-d="A" data-eq="mid" data-v="75"><div class="ktick"></div></div><div class="kd" id="eA-mid">+0dB</div></div>
-    <div class="kw"><div class="kl">LOW</div><div class="knob" data-d="A" data-eq="low" data-v="75"><div class="ktick"></div></div><div class="kd" id="eA-low">+0dB</div></div>
+    <div class="kw"><div class="kl">LOW</div><div class="knob" data-d="A" data-eq="lo" data-v="75"><div class="ktick"></div></div><div class="kd" id="eA-lo">+0dB</div></div>
   </div>
 
   <div class="botc">
@@ -421,7 +421,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
   <div class="eqrow">
     <div class="kw"><div class="kl">HI</div><div class="knob" data-d="B" data-eq="hi" data-v="75"><div class="ktick"></div></div><div class="kd" id="eB-hi">+0dB</div></div>
     <div class="kw"><div class="kl">MID</div><div class="knob" data-d="B" data-eq="mid" data-v="75"><div class="ktick"></div></div><div class="kd" id="eB-mid">+0dB</div></div>
-    <div class="kw"><div class="kl">LOW</div><div class="knob" data-d="B" data-eq="low" data-v="75"><div class="ktick"></div></div><div class="kd" id="eB-low">+0dB</div></div>
+    <div class="kw"><div class="kl">LOW</div><div class="knob" data-d="B" data-eq="lo" data-v="75"><div class="ktick"></div></div><div class="kd" id="eB-lo">+0dB</div></div>
   </div>
 
   <div class="botc">
@@ -774,7 +774,9 @@ async function _loadViaMediaElement(d, info){
     if(MEDIA_SRCS[d]){ try{MEDIA_SRCS[d].disconnect();}catch(e){} MEDIA_SRCS[d]=null; }
 
     var el = new Audio();
-    el.crossOrigin = 'anonymous'; // required for Web Audio API connection
+    // Note: crossOrigin='anonymous' is NOT set here because Invidious/Piped URLs
+    // do not return CORS headers, which causes the element to fail entirely.
+    // Without it we lose MediaElementSource Web Audio routing, but audio plays.
     el.src = info.url;
     el.preload = 'metadata';
     AUDIO_ELS[d] = el;
@@ -789,54 +791,30 @@ async function _loadViaMediaElement(d, info){
     if(info.duration && info.duration > 0) S[d].dur = info.duration;
     else if(el.duration && isFinite(el.duration)) S[d].dur = el.duration;
 
-    // Build Web Audio graph using MediaElementSource
-    if(!CTX) initAudioCtx();
-    if(CTX.state==='suspended') await CTX.resume();
-
+    // Without crossOrigin='anonymous' we cannot route through Web Audio (MediaElementSource
+    // requires CORS), but audio plays natively through the element — which is what matters.
+    // EQ/FX are unavailable in this path but volume/playback control work fine.
     var N = NODES[d];
-    // Tear down old buffer source graph
     if(N.src){ try{N.src.stop();}catch(e){} N.src=null; }
-
-    // Create MediaElementSource node
-    var mediaSrc = CTX.createMediaElementSource(el);
-    MEDIA_SRCS[d] = mediaSrc;
-
-    // Build EQ/FX chain
-    N.gain     = CTX.createGain();
-    N.masterGain = CTX.createGain();
-    N.hi       = CTX.createBiquadFilter(); N.hi.type='highshelf';   N.hi.frequency.value=3200;
-    N.mid      = CTX.createBiquadFilter(); N.mid.type='peaking';    N.mid.frequency.value=1000; N.mid.Q.value=1;
-    N.lo       = CTX.createBiquadFilter(); N.lo.type='lowshelf';    N.lo.frequency.value=320;
-    N.filter   = CTX.createBiquadFilter(); N.filter.type='lowpass'; N.filter.frequency.value=20000;
-    N.analyser = CTX.createAnalyser();     N.analyser.fftSize=1024;
-
-    N.echo   = CTX.createDelay(1.0); N.echo.delayTime.value=0.375;
-    var echoFb=CTX.createGain(); echoFb.gain.value=0.4;
-    var echoDry=CTX.createGain(); echoDry.gain.value=0;
-    N.reverb = CTX.createConvolver(); N.reverb.buffer=makeReverbImpulse(CTX,2.5,2,false);
-    var reverbGain=CTX.createGain(); reverbGain.gain.value=0;
-    N.distort= CTX.createWaveShaper(); N.distort.curve=makeDistortionCurve(200); N.distort.oversample='4x';
-    var distortDry=CTX.createGain(); distortDry.gain.value=0;
-    var comp=CTX.createDynamicsCompressor();
-    comp.threshold.value=-18; comp.knee.value=8; comp.ratio.value=4;
-    comp.attack.value=0.003; comp.release.value=0.15;
-
-    // Wire: mediaSrc → hi → mid → lo → filter → gain → analyser → masterGain → comp → dest
-    mediaSrc.connect(N.hi);
-    N.hi.connect(N.mid); N.mid.connect(N.lo); N.lo.connect(N.filter); N.filter.connect(N.gain);
-    N.filter.connect(echoDry); echoDry.connect(N.echo); N.echo.connect(echoFb); echoFb.connect(N.echo); N.echo.connect(N.gain);
-    N.filter.connect(N.reverb); N.reverb.connect(reverbGain); reverbGain.connect(N.gain);
-    N.filter.connect(N.distort); N.distort.connect(distortDry); distortDry.connect(N.gain);
-    N.gain.connect(N.analyser); N.analyser.connect(N.masterGain); N.masterGain.connect(comp); comp.connect(CTX.destination);
-    N._echoWet=echoDry; N._reverbWet=reverbGain; N._distortWet=distortDry;
-
-    applyEq(d); updateVol(d); applyAllFx();
+    MEDIA_SRCS[d] = null; // no Web Audio routing in this path
 
     // Store a ref on el so play/pause/seek can control it
     el._deck = d;
+    el.addEventListener('ended', function(){
+      S[d].on = false;
+      setPlayBtn(d, '▶', false);
+    });
     IFRAME_AUDIO[d] = false;
     AUDIO_BUFFERS[d] = null; // no offline buffer — use element
-    cmd(d,'setVolume',[0]); // mute iframe
+    cmd(d,'setVolume',[0]); // mute iframe, audio el handles sound
+    // Apply initial volume to the audio element
+    var xf=+document.getElementById('xf').value/100;
+    var xfMult=d==='A'?Math.min(1,(1-xf)*2):Math.min(1,xf*2);
+    var gain=+document.getElementById('gain'+d).value/100;
+    var ch=+document.getElementById('ch'+d).value/100;
+    var chM=+document.getElementById('chM'+d).value/100;
+    var master=+document.getElementById('mvol').value/100;
+    el.volume = Math.min(1, gain*ch*chM*xfMult*master*1.5);
 
     // Analyse BPM from small fetch for analysis (non-blocking background task)
     _analyseInBackground(d, info.url);
@@ -1241,9 +1219,11 @@ function doPlay(d){
       cmd(d,'playVideo');
       cmd(d,'seekTo',[S[d]._pos||0,true]);
     } else if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+      updateVol(d); // ensure volume is applied before play
       AUDIO_ELS[d].currentTime = S[d]._pos||0;
-      AUDIO_ELS[d].play().catch(function(e){ console.warn('MediaElement play:',e); });
+      AUDIO_ELS[d].play().catch(function(e){ console.warn('MediaElement play:',e); toast('Audio blocked — click play again','e'); });
       cmd(d,'setVolume',[0]);
+      cmd(d,'seekTo',[S[d]._pos||0,true]);
       cmd(d,'playVideo');
     } else if(AUDIO_BUFFERS[d]){
       cmd(d,'setVolume',[0]);
@@ -1438,9 +1418,15 @@ function updateVol(d){
   var vol=gain*ch*chM*xfMult*master;
 
   if(!IFRAME_AUDIO[d] && AUDIO_BUFFERS[d] && NODES[d].gain){
+    // Full Web Audio buffer path — route through gain node, mute iframe
     NODES[d].gain.gain.value=vol*1.5;
     cmd(d,'setVolume',[0]);
+  } else if(!IFRAME_AUDIO[d] && AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+    // MediaElement path — set volume directly on the audio element, mute iframe
+    AUDIO_ELS[d].volume = Math.min(1, vol * 1.5);
+    cmd(d,'setVolume',[0]);
   } else {
+    // iframe-only fallback — let YouTube control volume
     cmd(d,'setVolume',[Math.round(vol*100)]);
   }
 }
@@ -1700,10 +1686,14 @@ function tick(){
     if(S[d].on){
       if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
         // MediaElement path — read actual position from element
-        S[d]._pos = AUDIO_ELS[d].currentTime || S[d]._pos;
+        var elTime = AUDIO_ELS[d].currentTime;
+        if(elTime > 0 || S[d]._pos === 0) S[d]._pos = elTime;
       } else {
         S[d]._pos+=dt*rateMultiplier;
       }
+    } else if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+      // Keep _pos in sync with element even when paused
+      S[d]._pos = AUDIO_ELS[d].currentTime || S[d]._pos;
     }
     var dur=S[d].dur||240, pos=S[d]._pos;
     if(dur>0&&pos>dur){ S[d]._pos=0; pos=0; if(S[d].on){S[d].on=false;setPlayBtn(d,'▶',false);} }
