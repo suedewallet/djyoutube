@@ -729,6 +729,7 @@ async function fetchAudioAndAnalyse(d, videoId){
       S[d].detectedBpm = bpmResult.bpm;
       S[d].beatPhase = bpmResult.phase;
       document.getElementById('bpm'+d).textContent = bpmResult.bpm.toFixed(1);
+      generateBeatGrid(d);
 
       document.getElementById('wfl'+d).textContent='DETECTING KEY...';
       var keyResult = detectKey(audioBuf);
@@ -868,11 +869,21 @@ async function _analyseInBackground(d, audioUrl){
 function _activateIframeFallback(d){
   IFRAME_AUDIO[d] = true;
   AUDIO_BUFFERS[d] = null;
-  cmd(d,'setVolume',[85]);
-  updateVol(d);
+  AUDIO_ELS[d] = null;
+
+  // Re-embed WITHOUT mute=1 so YouTube audio plays natively
+  var id = VIDS[d];
+  if(id){
+    var src = 'https://www.youtube-nocookie.com/embed/'+id
+      +'?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&controls=1&autoplay=0&mute=0';
+    document.getElementById('jf'+d).innerHTML =
+      '<iframe id="ifr'+d+'" src="'+src+'" frameborder="0" allow="autoplay;encrypted-media" allowfullscreen></iframe>';
+    FRAMES[d] = document.getElementById('ifr'+d);
+  }
+
   var pipedEl=document.getElementById('pipedStatus');
-  pipedEl.textContent='Audio: iframe only (EQ/FX unavailable)'; pipedEl.style.color='var(--ye)';
-  toast('Deck '+d+': using YouTube iframe audio — use tap tempo for BPM','lo');
+  pipedEl.textContent='Audio: YouTube iframe (EQ/FX off — Piped unavailable)'; pipedEl.style.color='var(--ye)';
+  toast('Deck '+d+': YouTube audio direct — playing via iframe','lo');
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1152,11 +1163,13 @@ function loadById(d,id,title,ch){
   if(ch)    document.getElementById('sub'+d).textContent=ch;
   document.getElementById('url'+d).value='https://www.youtube.com/watch?v='+id;
 
-  // Visual iframe (muted — Piped handles audio)
-  var src='https://www.youtube-nocookie.com/embed/'+id+'?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&controls=0&autoplay=0&mute=1';
+  // Embed with sound ON by default — we mute it programmatically if/when Piped audio loads
+  // This ensures there is always audio even if Piped/Invidious fails
+  var src='https://www.youtube-nocookie.com/embed/'+id+'?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&controls=1&autoplay=0&mute=0';
   var jogWrap=document.getElementById('jf'+d);
   jogWrap.innerHTML='<iframe id="ifr'+d+'" src="'+src+'" frameborder="0" allow="autoplay;encrypted-media" allowfullscreen></iframe>';
   FRAMES[d]=document.getElementById('ifr'+d);
+  IFRAME_AUDIO[d]=true; // assume iframe audio until Piped proves otherwise
   document.getElementById('jvph'+d).style.display='none';
 
   S[d].ok=true; S[d].on=false; S[d]._pos=0; S[d].dur=0;
@@ -1203,32 +1216,46 @@ function doPlay(d){
   if(CTX && CTX.state==='suspended') CTX.resume();
 
   if(S[d].on){
-    if(IFRAME_AUDIO[d]){
+    // PAUSE
+    if(AUDIO_BUFFERS[d] && NODES[d].src && !IFRAME_AUDIO[d]){
+      stopWithTorque(d);
+      setTimeout(function(){ try{NODES[d].src.stop();}catch(e){} NODES[d].src=null; }, 180);
       cmd(d,'pauseVideo');
-    } else if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+    } else if(AUDIO_ELS[d] && !IFRAME_AUDIO[d]){
+      stopWithTorque(d);
       AUDIO_ELS[d].pause();
       cmd(d,'pauseVideo');
-    } else if(AUDIO_BUFFERS[d] && NODES[d].src){
-      try{NODES[d].src.stop();}catch(e){}
-      NODES[d].src=null;
+    } else {
+      // iframe audio
       cmd(d,'pauseVideo');
     }
     S[d].on=false; setPlayBtn(d,'▶',false);
+
   } else {
-    if(IFRAME_AUDIO[d]){
-      cmd(d,'playVideo');
-      cmd(d,'seekTo',[S[d]._pos||0,true]);
-    } else if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
-      updateVol(d); // ensure volume is applied before play
-      AUDIO_ELS[d].currentTime = S[d]._pos||0;
-      AUDIO_ELS[d].play().catch(function(e){ console.warn('MediaElement play:',e); toast('Audio blocked — click play again','e'); });
+    // PLAY
+    if(AUDIO_BUFFERS[d] && !IFRAME_AUDIO[d]){
+      // Best path: full Web Audio buffer
       cmd(d,'setVolume',[0]);
-      cmd(d,'seekTo',[S[d]._pos||0,true]);
-      cmd(d,'playVideo');
-    } else if(AUDIO_BUFFERS[d]){
-      cmd(d,'setVolume',[0]);
-      cmd(d,'playVideo');
       _startWebAudio(d, S[d]._pos||0);
+      cmd(d,'seekTo',[S[d]._pos||0,true]);
+      cmd(d,'playVideo');
+      playWithTorque(d);
+    } else if(AUDIO_ELS[d] && !IFRAME_AUDIO[d]){
+      // MediaElement path
+      updateVol(d);
+      AUDIO_ELS[d].currentTime = S[d]._pos||0;
+      AUDIO_ELS[d].play().catch(function(e){
+        console.warn('MediaElement play blocked:',e);
+        toast('Click play again — browser needs interaction','lo');
+      });
+      playWithTorque(d);
+      cmd(d,'setVolume',[0]);
+      cmd(d,'seekTo',[S[d]._pos||0,true]);
+      cmd(d,'playVideo');
+    } else {
+      // Iframe audio fallback — YouTube handles sound directly
+      cmd(d,'seekTo',[S[d]._pos||0,true]);
+      cmd(d,'playVideo');
     }
     S[d].on=true; setPlayBtn(d,'⏸',true);
     S[d].beatStartTime = CTX ? CTX.currentTime - (S[d]._pos % (60/S[d].bpm)) : 0;
@@ -1475,78 +1502,257 @@ function applyAllFx(){
 }
 
 // ═══════════════════════════════════════════════════════
-// JOGWHEEL
+// CONTROL PRIORITY SYSTEM
+// Higher priority input wins — scratch overrides sync etc.
 // ═══════════════════════════════════════════════════════
-var JOG_DRAG={d:null,startY:0,startPos:0,scratchActive:false};
-function jogDown(d,e){
-  if(!S[d].ok) return;
-  JOG_DRAG.d=d; JOG_DRAG.startY=e.clientY; JOG_DRAG.startPos=S[d]._pos;
-  JOG_DRAG.scratchActive=true;
-  if(S[d].on && !IFRAME_AUDIO[d] && NODES[d].src){
-    try{NODES[d].src.playbackRate.value=0;}catch(e2){}
+var PRIORITY = { SCRATCH: 4, JOG: 3, CUE: 2, LOOP: 1, SYNC: 0 };
+// Per-deck active priority (resets when input released)
+var ACTIVE_PRIORITY = { A: -1, B: -1 };
+
+function applyInput(d, newPos, priority) {
+  if (priority < ACTIVE_PRIORITY[d]) return false;
+  ACTIVE_PRIORITY[d] = priority;
+  newPos = cl(0, S[d].dur || 300, newPos);
+  S[d]._pos = newPos;
+  cmd(d, 'seekTo', [newPos, true]);
+  if (AUDIO_ELS[d] && !AUDIO_BUFFERS[d]) {
+    AUDIO_ELS[d].currentTime = newPos;
   }
+  return true;
+}
+function releasePriority(d, priority) {
+  if (ACTIVE_PRIORITY[d] <= priority) ACTIVE_PRIORITY[d] = -1;
+}
+
+// ═══════════════════════════════════════════════════════
+// VINYL MOTOR — hardware inertia feel
+// ═══════════════════════════════════════════════════════
+var VinylMotor = {
+  A: { speed: 0, targetSpeed: 0 },
+  B: { speed: 0, targetSpeed: 0 }
+};
+function motorApplyTorque(d, inputVelocity) {
+  VinylMotor[d].targetSpeed = inputVelocity;
+  // inertia: ~18 frames to reach target (hardware feel)
+  VinylMotor[d].speed += (VinylMotor[d].targetSpeed - VinylMotor[d].speed) * 0.18;
+  return VinylMotor[d].speed;
+}
+
+// ═══════════════════════════════════════════════════════
+// MASTER CLOCK — for phase-lock continuous sync
+// ═══════════════════════════════════════════════════════
+var MasterClock = {
+  startTime: performance.now(),
+  bpm: 128,
+  getBeatPhase: function() {
+    var elapsed = (performance.now() - this.startTime) / 1000;
+    return (elapsed * (this.bpm / 60)) % 1;
+  }
+};
+
+// ═══════════════════════════════════════════════════════
+// BEAT GRID + BEAT MAGNET
+// ═══════════════════════════════════════════════════════
+function generateBeatGrid(d) {
+  if (!S[d].bpm || !S[d].dur) return;
+  var interval = 60 / S[d].bpm;
+  var grid = [];
+  for (var t = S[d].beatPhase || 0; t < S[d].dur; t += interval) grid.push(t);
+  S[d]._beatGrid = grid;
+}
+
+function applyBeatMagnet(d, time) {
+  // Only snap when NOT scratching — within ~40ms of a beat
+  if (!S[d]._beatGrid) return time;
+  var threshold = 0.04;
+  for (var i = 0; i < S[d]._beatGrid.length; i++) {
+    var beat = S[d]._beatGrid[i];
+    if (Math.abs(time - beat) < threshold) return beat;
+  }
+  return time;
+}
+
+// ═══════════════════════════════════════════════════════
+// TORQUE PLAY / STOP (motor spin-up feel)
+// ═══════════════════════════════════════════════════════
+function playWithTorque(d) {
+  var targetRate = cl(0.25, 2, 1 + (parseFloat(document.getElementById('pi'+d).value)||0)/100);
+  var rate = 0;
+  var ramp = function() {
+    rate += 0.06;
+    if (rate >= targetRate) rate = targetRate;
+    _applyRate(d, rate);
+    if (rate < targetRate) requestAnimationFrame(ramp);
+  };
+  ramp();
+}
+function stopWithTorque(d) {
+  var rate = _getRate(d);
+  var rampDown = function() {
+    rate *= 0.82;
+    if (rate < 0.04) { _applyRate(d, 0); return; }
+    _applyRate(d, rate);
+    requestAnimationFrame(rampDown);
+  };
+  rampDown();
+}
+function _getRate(d) {
+  if (!IFRAME_AUDIO[d] && NODES[d].src) { try { return NODES[d].src.playbackRate.value; } catch(e){} }
+  if (AUDIO_ELS[d]) return AUDIO_ELS[d].playbackRate || 1;
+  return 1;
+}
+function _applyRate(d, r) {
+  cmd(d, 'setPlaybackRate', [r]);
+  if (!IFRAME_AUDIO[d] && NODES[d].src) { try { NODES[d].src.playbackRate.value = r; } catch(e){} }
+  if (AUDIO_ELS[d]) AUDIO_ELS[d].playbackRate = r;
+}
+
+// ═══════════════════════════════════════════════════════
+// PHASE LOCK (continuous soft correction during sync)
+// ═══════════════════════════════════════════════════════
+function phaseLockTick() {
+  ['A','B'].forEach(function(d) {
+    if (!S[d].sync || !S[d].on || ACTIVE_PRIORITY[d] >= PRIORITY.JOG) return;
+    var other = d==='A'?'B':'A';
+    if (!S[other].on) return;
+    var beatLen = 60 / S[d].bpm;
+    var myPhase   = (S[d]._pos % beatLen) / beatLen;
+    var theirPhase = (S[other]._pos % beatLen) / beatLen;
+    var error = theirPhase - myPhase;
+    if (error > 0.5) error -= 1;
+    if (error < -0.5) error += 1;
+    // Soft nudge — never snaps, feels like hardware
+    var correction = error * 0.0015;
+    S[d]._pos = cl(0, S[d].dur, S[d]._pos + correction);
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+// JOGWHEEL — full vinyl scratch engine
+// ═══════════════════════════════════════════════════════
+var JOG = {
+  d: null,
+  lastX: 0, lastY: 0,
+  lastT: 0,
+  lastVelocity: 0,
+  wasPlaying: false,
+  scratchActive: false
+};
+
+function _jogClientPos(e) {
+  // Returns {x, y} regardless of mouse or touch
+  if (e.touches) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  return { x: e.clientX, y: e.clientY };
+}
+
+function jogDown(d, e) {
+  if (!S[d].ok) return;
+  var pos = _jogClientPos(e);
+  JOG.d = d;
+  JOG.lastX = pos.x; JOG.lastY = pos.y;
+  JOG.lastT = performance.now();
+  JOG.lastVelocity = 0;
+  JOG.wasPlaying = S[d].on;
+  JOG.scratchActive = true;
+  ACTIVE_PRIORITY[d] = PRIORITY.SCRATCH;
+
+  // Freeze playback — scratch takes over timeline
+  S[d].on = false;
+  setPlayBtn(d, '▶', false);
+  _applyRate(d, 0);
+  document.getElementById('jog'+d).classList.add('scratching');
   e.preventDefault();
 }
-function jogTouchDown(d,e){
-  if(!S[d].ok) return;
-  JOG_DRAG.d=d; JOG_DRAG.startY=e.touches[0].clientY; JOG_DRAG.startPos=S[d]._pos;
-  JOG_DRAG.scratchActive=true;
-  if(S[d].on && !IFRAME_AUDIO[d] && NODES[d].src) try{NODES[d].src.playbackRate.value=0;}catch(e2){}
+function jogTouchDown(d, e) { jogDown(d, e); }
+
+function _jogMove(e) {
+  if (!JOG.d || !JOG.scratchActive) return;
+  var d = JOG.d;
+  var pos = _jogClientPos(e);
+  var now = performance.now();
+
+  // Horizontal drag = scratch (like a real platter being turned)
+  var dx = pos.x - JOG.lastX;
+  var dt = Math.max(now - JOG.lastT, 1);
+  JOG.lastX = pos.x; JOG.lastY = pos.y; JOG.lastT = now;
+
+  // Raw velocity (px/ms)
+  var rawVel = dx / dt;
+  JOG.lastVelocity = rawVel;
+
+  // Non-linear response curve — the magic from GPT
+  var shaped = Math.sign(rawVel) * Math.pow(Math.abs(rawVel), 0.65);
+
+  // Vinyl motor inertia
+  var platterSpeed = motorApplyTorque(d, shaped);
+
+  // Convert platter movement → time delta
+  var sensitivity = 0.35;
+  var timeDelta = platterSpeed * sensitivity * 16;
+
+  // Apply to timeline (SCRATCH = highest priority, bypasses beat magnet)
+  var newPos = cl(0, S[d].dur || 300, S[d]._pos + timeDelta);
+  S[d]._pos = newPos;
+  cmd(d, 'seekTo', [newPos, true]);
+  if (AUDIO_ELS[d] && !AUDIO_BUFFERS[d]) AUDIO_ELS[d].currentTime = newPos;
+
+  // Jog visual rotation follows hand movement
+  S[d]._jogAngle += dx * 1.8;
+  document.getElementById('jsr'+d).style.transform = 'rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
 }
-document.addEventListener('mousemove',function(e){
-  if(!JOG_DRAG.d||!JOG_DRAG.scratchActive) return;
-  var d=JOG_DRAG.d;
-  var dy=JOG_DRAG.startY-e.clientY;
-  var dur=S[d].dur||180;
-  var newPos=cl(0,dur,JOG_DRAG.startPos+dy*(dur/400));
-  S[d]._pos=newPos;
-  cmd(d,'seekTo',[newPos,true]);
-  S[d]._jogAngle+=dy*2;
-  document.getElementById('jsr'+d).style.transform='rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
-  JOG_DRAG.startY=e.clientY;
-  JOG_DRAG.startPos=newPos;
-});
-document.addEventListener('touchmove',function(e){
-  if(!JOG_DRAG.d||!JOG_DRAG.scratchActive) return;
-  var d=JOG_DRAG.d;
-  var dy=JOG_DRAG.startY-e.touches[0].clientY;
-  var dur=S[d].dur||180;
-  var newPos=cl(0,dur,JOG_DRAG.startPos+dy*(dur/400));
-  S[d]._pos=newPos;
-  cmd(d,'seekTo',[newPos,true]);
-  S[d]._jogAngle+=dy*2;
-  document.getElementById('jsr'+d).style.transform='rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
-  JOG_DRAG.startY=e.touches[0].clientY;
-  JOG_DRAG.startPos=newPos;
-},{passive:true});
-document.addEventListener('mouseup',function(){
-  if(!JOG_DRAG.d) return;
-  var d=JOG_DRAG.d;
-  JOG_DRAG.scratchActive=false;
-  if(S[d].on){
-    if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
-      AUDIO_ELS[d].currentTime=S[d]._pos;
-      var base=cl(.25,2,1+(parseFloat(document.getElementById('pi'+d).value)||0)/100);
-      AUDIO_ELS[d].playbackRate=base;
-    } else if(!IFRAME_AUDIO[d] && AUDIO_BUFFERS[d]){
-      _startWebAudio(d, S[d]._pos);
+
+function _jogUp() {
+  if (!JOG.d) return;
+  var d = JOG.d;
+  JOG.scratchActive = false;
+  document.getElementById('jog'+d).classList.remove('scratching');
+
+  // ── Momentum / inertia ──
+  var velocity = JOG.lastVelocity || 0;
+  var momentum = velocity * 22; // tune: bigger = more throw
+  var decay = function() {
+    if (Math.abs(momentum) < 0.001) {
+      // Momentum done — snap to nearest beat if close enough
+      if (!JOG.wasPlaying) {
+        ACTIVE_PRIORITY[d] = -1;
+        JOG.d = null;
+        return;
+      }
+      // Resume playback
+      S[d].on = true;
+      setPlayBtn(d, '⏸', true);
+      if (AUDIO_ELS[d] && !AUDIO_BUFFERS[d]) {
+        AUDIO_ELS[d].currentTime = S[d]._pos;
+        AUDIO_ELS[d].play().catch(function(){});
+        playWithTorque(d);
+      } else if (!IFRAME_AUDIO[d] && AUDIO_BUFFERS[d]) {
+        _startWebAudio(d, S[d]._pos);
+        playWithTorque(d);
+      } else if (IFRAME_AUDIO[d]) {
+        cmd(d, 'seekTo', [S[d]._pos, true]);
+        cmd(d, 'playVideo');
+        playWithTorque(d);
+      }
+      releasePriority(d, PRIORITY.SCRATCH);
+      JOG.d = null;
+      return;
     }
-  }
-  JOG_DRAG.d=null;
-});
-document.addEventListener('touchend',function(){
-  if(!JOG_DRAG.d) return;
-  var d=JOG_DRAG.d;
-  JOG_DRAG.scratchActive=false;
-  if(S[d].on){
-    if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
-      AUDIO_ELS[d].currentTime=S[d]._pos;
-    } else if(!IFRAME_AUDIO[d] && AUDIO_BUFFERS[d]){
-      _startWebAudio(d, S[d]._pos);
-    }
-  }
-  JOG_DRAG.d=null;
-});
+    S[d]._pos = cl(0, S[d].dur || 300, S[d]._pos + momentum);
+    cmd(d, 'seekTo', [S[d]._pos, true]);
+    if (AUDIO_ELS[d] && !AUDIO_BUFFERS[d]) AUDIO_ELS[d].currentTime = S[d]._pos;
+    // Jog keeps spinning as momentum decays
+    S[d]._jogAngle += momentum * 120;
+    document.getElementById('jsr'+d).style.transform = 'rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
+    momentum *= 0.92; // friction
+    requestAnimationFrame(decay);
+  };
+  decay();
+}
+
+document.addEventListener('mousemove', _jogMove);
+document.addEventListener('touchmove', function(e) { _jogMove(e); }, { passive: true });
+document.addEventListener('mouseup', _jogUp);
+document.addEventListener('touchend', _jogUp);
 
 // ═══════════════════════════════════════════════════════
 // TAP TEMPO
@@ -1564,6 +1770,7 @@ function tapTempo(d){
     S[d].bpm=bpm;
     S[d].detectedBpm=bpm;
     document.getElementById('bpm'+d).textContent=bpm.toFixed(1);
+    generateBeatGrid(d);
     toast('Deck '+d+' TAP BPM: '+bpm.toFixed(1),'ok');
   }
 }
@@ -1690,6 +1897,10 @@ function tick(){
         if(elTime > 0 || S[d]._pos === 0) S[d]._pos = elTime;
       } else {
         S[d]._pos+=dt*rateMultiplier;
+        // Beat magnet: subtle snap during normal playback only
+        if(!JOG.scratchActive || JOG.d !== d){
+          S[d]._pos = applyBeatMagnet(d, S[d]._pos);
+        }
       }
     } else if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
       // Keep _pos in sync with element even when paused
@@ -1731,6 +1942,9 @@ function tick(){
     else{ PKS[d]=Math.max(0,PKS[d]-.25); document.getElementById('vp'+d).style.top=(100-PKS[d]).toFixed(0)+'%'; }
   });
 
+  // Phase lock continuous correction (soft, hardware-style)
+  phaseLockTick();
+
   // Clock
   var n=new Date();
   document.getElementById('clk').textContent=n.getHours().toString().padStart(2,'0')+':'+n.getMinutes().toString().padStart(2,'0')+':'+n.getSeconds().toString().padStart(2,'0');
@@ -1746,6 +1960,16 @@ function pill(id,txt,cls){ var el=document.getElementById(id); el.textContent=tx
 function setPlayBtn(d,txt,on){ var el=document.getElementById('ply'+d); el.textContent=txt; on?el.classList.add('playing'):el.classList.remove('playing'); }
 var _tid;
 function toast(msg,t){ var el=document.getElementById('toast'); el.textContent=msg; el.className='show'+(t==='e'?' te':t==='ok'?' tok':t==='lo'?' tlo':''); clearTimeout(_tid); _tid=setTimeout(function(){ el.classList.remove('show'); },3200); }
+
+// ── YOUTUBE IFRAME API ──
+// Required for postMessage commands (setVolume, seekTo, playVideo etc) to work
+var tag = document.createElement('script');
+tag.src = 'https://www.youtube.com/iframe_api';
+document.head.appendChild(tag);
+// API ready callback
+window.onYouTubeIframeAPIReady = function(){
+  console.log('YouTube IFrame API ready');
+};
 
 // ── BOOT ──
 drawFakeWaveform('A'); drawFakeWaveform('B');
