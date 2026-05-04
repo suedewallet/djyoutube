@@ -683,12 +683,18 @@ async function getAudioUrl(videoId){
   throw new Error('No audio URL found');
 }
 
+// Hidden audio elements for MediaElementSource (bypasses CORS fetch restriction)
+var AUDIO_ELS = {A:null, B:null};
+var MEDIA_SRCS = {A:null, B:null};
+
 async function fetchAudioAndAnalyse(d, videoId){
   if(!initAudioCtx()) return null;
   document.getElementById('wfl'+d).classList.add('show');
+  document.getElementById('wfl'+d).textContent='LOADING AUDIO...';
   IFRAME_AUDIO[d] = false;
+
   try{
-    var info=await getAudioUrl(videoId);
+    var info = await getAudioUrl(videoId);
 
     if(info.title && document.getElementById('ttl'+d).textContent==='No track loaded'){
       document.getElementById('ttl'+d).textContent=info.title;
@@ -696,59 +702,199 @@ async function fetchAudioAndAnalyse(d, videoId){
     }
     if(info.duration){ S[d].dur=info.duration; }
 
-    var ar=await fetch(info.url);
-    if(!ar.ok) throw new Error('Audio fetch failed: '+ar.status);
-    var arrayBuf=await ar.arrayBuffer();
-    var audioBuf=await CTX.decodeAudioData(arrayBuf);
-    AUDIO_BUFFERS[d]=audioBuf;
-    S[d].dur=audioBuf.duration;
+    // ── Strategy 1: ArrayBuffer fetch (best — enables BPM/key analysis) ──
+    // Try with no-cors first, then fall through to MediaElement
+    var audioBuf = null;
+    try{
+      var controller = new AbortController();
+      var fetchTimeout = setTimeout(function(){ controller.abort(); }, 12000);
+      var ar = await fetch(info.url, {signal: controller.signal});
+      clearTimeout(fetchTimeout);
+      if(!ar.ok) throw new Error('fetch '+ar.status);
+      var arrayBuf = await ar.arrayBuffer();
+      audioBuf = await CTX.decodeAudioData(arrayBuf);
+    }catch(fetchErr){
+      console.warn('ArrayBuffer fetch failed (likely CORS), trying MediaElement:', fetchErr.message);
+      audioBuf = null;
+    }
 
-    // Analyse
-    document.getElementById('wfl'+d).textContent='DETECTING BPM...';
+    if(audioBuf){
+      // ── Full Web Audio path — BPM + Key detection available ──
+      AUDIO_BUFFERS[d] = audioBuf;
+      S[d].dur = audioBuf.duration;
+
+      document.getElementById('wfl'+d).textContent='DETECTING BPM...';
+      var bpmResult = detectBPMAdvanced(audioBuf);
+      S[d].bpm = bpmResult.bpm;
+      S[d].detectedBpm = bpmResult.bpm;
+      S[d].beatPhase = bpmResult.phase;
+      document.getElementById('bpm'+d).textContent = bpmResult.bpm.toFixed(1);
+
+      document.getElementById('wfl'+d).textContent='DETECTING KEY...';
+      var keyResult = detectKey(audioBuf);
+      S[d].key = keyResult.key;
+      S[d].camelot = keyResult.camelot;
+      document.getElementById('key'+d).textContent = keyResult.camelot !== '--' ? keyResult.camelot : keyResult.key;
+      document.getElementById('key'+d).title = keyResult.key + ' (' + keyResult.camelot + ')';
+
+      var normalGain = computeNormalizationGain(audioBuf);
+      drawRealWaveform(d, audioBuf);
+      buildAudioGraph(d, audioBuf);
+      if(NODES[d].masterGain) NODES[d].masterGain.gain.value = normalGain;
+
+      IFRAME_AUDIO[d] = false;
+      cmd(d,'setVolume',[0]);
+
+      document.getElementById('wfl'+d).classList.remove('show');
+      document.getElementById('wfl'+d).textContent='ANALYSING...';
+      var pipedEl=document.getElementById('pipedStatus');
+      pipedEl.textContent='Audio: Web Audio ✓ (EQ/FX active)'; pipedEl.style.color='var(--gr)';
+      toast('Deck '+d+' — BPM: '+bpmResult.bpm.toFixed(1)+' | Key: '+keyResult.key+' ('+keyResult.camelot+')','ok');
+      updateKeyCompat();
+      return audioBuf;
+
+    } else {
+      // ── Strategy 2: MediaElementSource — CORS-safe, gives EQ/FX/VU but no offline analysis ──
+      return await _loadViaMediaElement(d, info);
+    }
+
+  }catch(e){
+    document.getElementById('wfl'+d).classList.remove('show');
+    document.getElementById('wfl'+d).textContent='ANALYSING...';
+    console.warn('Audio pipeline error:', e);
+    _activateIframeFallback(d);
+    return null;
+  }
+}
+
+async function _loadViaMediaElement(d, info){
+  try{
+    // Tear down existing audio element
+    if(AUDIO_ELS[d]){ AUDIO_ELS[d].pause(); AUDIO_ELS[d].src=''; }
+    if(MEDIA_SRCS[d]){ try{MEDIA_SRCS[d].disconnect();}catch(e){} MEDIA_SRCS[d]=null; }
+
+    var el = new Audio();
+    el.crossOrigin = 'anonymous'; // required for Web Audio API connection
+    el.src = info.url;
+    el.preload = 'metadata';
+    AUDIO_ELS[d] = el;
+
+    // Wait for metadata to get duration
+    await new Promise(function(res, rej){
+      var t = setTimeout(function(){ rej(new Error('metadata timeout')); }, 10000);
+      el.addEventListener('loadedmetadata', function(){ clearTimeout(t); res(); }, {once:true});
+      el.addEventListener('error', function(){ clearTimeout(t); rej(new Error('audio element error: '+el.error?.message)); }, {once:true});
+    });
+
+    if(info.duration && info.duration > 0) S[d].dur = info.duration;
+    else if(el.duration && isFinite(el.duration)) S[d].dur = el.duration;
+
+    // Build Web Audio graph using MediaElementSource
+    if(!CTX) initAudioCtx();
+    if(CTX.state==='suspended') await CTX.resume();
+
+    var N = NODES[d];
+    // Tear down old buffer source graph
+    if(N.src){ try{N.src.stop();}catch(e){} N.src=null; }
+
+    // Create MediaElementSource node
+    var mediaSrc = CTX.createMediaElementSource(el);
+    MEDIA_SRCS[d] = mediaSrc;
+
+    // Build EQ/FX chain
+    N.gain     = CTX.createGain();
+    N.masterGain = CTX.createGain();
+    N.hi       = CTX.createBiquadFilter(); N.hi.type='highshelf';   N.hi.frequency.value=3200;
+    N.mid      = CTX.createBiquadFilter(); N.mid.type='peaking';    N.mid.frequency.value=1000; N.mid.Q.value=1;
+    N.lo       = CTX.createBiquadFilter(); N.lo.type='lowshelf';    N.lo.frequency.value=320;
+    N.filter   = CTX.createBiquadFilter(); N.filter.type='lowpass'; N.filter.frequency.value=20000;
+    N.analyser = CTX.createAnalyser();     N.analyser.fftSize=1024;
+
+    N.echo   = CTX.createDelay(1.0); N.echo.delayTime.value=0.375;
+    var echoFb=CTX.createGain(); echoFb.gain.value=0.4;
+    var echoDry=CTX.createGain(); echoDry.gain.value=0;
+    N.reverb = CTX.createConvolver(); N.reverb.buffer=makeReverbImpulse(CTX,2.5,2,false);
+    var reverbGain=CTX.createGain(); reverbGain.gain.value=0;
+    N.distort= CTX.createWaveShaper(); N.distort.curve=makeDistortionCurve(200); N.distort.oversample='4x';
+    var distortDry=CTX.createGain(); distortDry.gain.value=0;
+    var comp=CTX.createDynamicsCompressor();
+    comp.threshold.value=-18; comp.knee.value=8; comp.ratio.value=4;
+    comp.attack.value=0.003; comp.release.value=0.15;
+
+    // Wire: mediaSrc → hi → mid → lo → filter → gain → analyser → masterGain → comp → dest
+    mediaSrc.connect(N.hi);
+    N.hi.connect(N.mid); N.mid.connect(N.lo); N.lo.connect(N.filter); N.filter.connect(N.gain);
+    N.filter.connect(echoDry); echoDry.connect(N.echo); N.echo.connect(echoFb); echoFb.connect(N.echo); N.echo.connect(N.gain);
+    N.filter.connect(N.reverb); N.reverb.connect(reverbGain); reverbGain.connect(N.gain);
+    N.filter.connect(N.distort); N.distort.connect(distortDry); distortDry.connect(N.gain);
+    N.gain.connect(N.analyser); N.analyser.connect(N.masterGain); N.masterGain.connect(comp); comp.connect(CTX.destination);
+    N._echoWet=echoDry; N._reverbWet=reverbGain; N._distortWet=distortDry;
+
+    applyEq(d); updateVol(d); applyAllFx();
+
+    // Store a ref on el so play/pause/seek can control it
+    el._deck = d;
+    IFRAME_AUDIO[d] = false;
+    AUDIO_BUFFERS[d] = null; // no offline buffer — use element
+    cmd(d,'setVolume',[0]); // mute iframe
+
+    // Analyse BPM from small fetch for analysis (non-blocking background task)
+    _analyseInBackground(d, info.url);
+
+    document.getElementById('wfl'+d).classList.remove('show');
+    document.getElementById('wfl'+d).textContent='ANALYSING...';
+    var pipedEl=document.getElementById('pipedStatus');
+    pipedEl.textContent='Audio: Web Audio ✓ (MediaElement — EQ/FX active)'; pipedEl.style.color='var(--gr)';
+    toast('Deck '+d+' ready — EQ/FX active | analysing BPM…','ok');
+    return el;
+
+  }catch(mediaErr){
+    console.warn('MediaElement Web Audio failed:', mediaErr.message);
+    _activateIframeFallback(d);
+    return null;
+  }
+}
+
+async function _analyseInBackground(d, audioUrl){
+  // Fetch just the first 30s worth of bytes for BPM/Key analysis
+  // Use Range header to limit download size (~1.5MB for 30s at 320kbps)
+  try{
+    var r = await fetch(audioUrl, {
+      headers: {'Range': 'bytes=0-1500000'},
+      signal: AbortSignal.timeout(15000)
+    });
+    if(!r.ok && r.status !== 206) return; // 206 = partial content OK
+    var buf = await r.arrayBuffer();
+    var audioBuf = await CTX.decodeAudioData(buf);
+
     var bpmResult = detectBPMAdvanced(audioBuf);
     S[d].bpm = bpmResult.bpm;
     S[d].detectedBpm = bpmResult.bpm;
-    S[d].beatPhase = bpmResult.phase;
     document.getElementById('bpm'+d).textContent = bpmResult.bpm.toFixed(1);
 
-    document.getElementById('wfl'+d).textContent='DETECTING KEY...';
     var keyResult = detectKey(audioBuf);
     S[d].key = keyResult.key;
     S[d].camelot = keyResult.camelot;
     document.getElementById('key'+d).textContent = keyResult.camelot !== '--' ? keyResult.camelot : keyResult.key;
     document.getElementById('key'+d).title = keyResult.key + ' (' + keyResult.camelot + ')';
 
-    // Auto-normalize
-    var normalGain = computeNormalizationGain(audioBuf);
-
-    drawRealWaveform(d, audioBuf);
-    buildAudioGraph(d, audioBuf);
-
-    // Apply normalization
-    if(NODES[d].masterGain) NODES[d].masterGain.gain.value = normalGain;
-
-    document.getElementById('wfl'+d).classList.remove('show');
-    document.getElementById('wfl'+d).textContent='ANALYSING...';
-
-    // Mute iframe — Web Audio handles playback
-    cmd(d,'setVolume',[0]);
-    IFRAME_AUDIO[d] = false;
-
+    drawRealWaveform(d, audioBuf); // approximate waveform from partial audio
+    updateKeyCompat();
     toast('Deck '+d+' — BPM: '+bpmResult.bpm.toFixed(1)+' | Key: '+keyResult.key+' ('+keyResult.camelot+')','ok');
-    return audioBuf;
   }catch(e){
-    document.getElementById('wfl'+d).classList.remove('show');
-    document.getElementById('wfl'+d).textContent='ANALYSING...';
-    console.warn('Audio pipeline error:',e);
-    // FALLBACK: unmute the iframe so user hears something
-    IFRAME_AUDIO[d] = true;
-    cmd(d,'setVolume',[80]);
-    updateVol(d);
-    var pipedEl=document.getElementById('pipedStatus');
-    pipedEl.textContent='Audio: iframe fallback (EQ/FX disabled)'; pipedEl.style.color='var(--ye)';
-    toast('Web Audio failed — iframe fallback active (no EQ/FX)','lo');
-    return null;
+    console.warn('Background analysis failed (CORS likely):', e.message);
+    // BPM stays at tap/default, key stays at --
   }
+}
+
+function _activateIframeFallback(d){
+  IFRAME_AUDIO[d] = true;
+  AUDIO_BUFFERS[d] = null;
+  cmd(d,'setVolume',[85]);
+  updateVol(d);
+  var pipedEl=document.getElementById('pipedStatus');
+  pipedEl.textContent='Audio: iframe only (EQ/FX unavailable)'; pipedEl.style.color='var(--ye)';
+  toast('Deck '+d+': using YouTube iframe audio — use tap tempo for BPM','lo');
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1079,31 +1225,32 @@ function doPlay(d){
   if(CTX && CTX.state==='suspended') CTX.resume();
 
   if(S[d].on){
-    // Pause
     if(IFRAME_AUDIO[d]){
+      cmd(d,'pauseVideo');
+    } else if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+      AUDIO_ELS[d].pause();
       cmd(d,'pauseVideo');
     } else if(AUDIO_BUFFERS[d] && NODES[d].src){
       try{NODES[d].src.stop();}catch(e){}
       NODES[d].src=null;
-      // Keep iframe in sync visually
       cmd(d,'pauseVideo');
     }
     S[d].on=false; setPlayBtn(d,'▶',false);
   } else {
-    // Play
     if(IFRAME_AUDIO[d]){
-      // Iframe fallback — let iframe handle audio
       cmd(d,'playVideo');
       cmd(d,'seekTo',[S[d]._pos||0,true]);
-    } else if(AUDIO_BUFFERS[d]){
-      // Web Audio path
+    } else if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+      AUDIO_ELS[d].currentTime = S[d]._pos||0;
+      AUDIO_ELS[d].play().catch(function(e){ console.warn('MediaElement play:',e); });
       cmd(d,'setVolume',[0]);
-      cmd(d,'playVideo'); // for visual sync
+      cmd(d,'playVideo');
+    } else if(AUDIO_BUFFERS[d]){
+      cmd(d,'setVolume',[0]);
+      cmd(d,'playVideo');
       _startWebAudio(d, S[d]._pos||0);
     }
     S[d].on=true; setPlayBtn(d,'⏸',true);
-
-    // Auto-record play start time for phase sync
     S[d].beatStartTime = CTX ? CTX.currentTime - (S[d]._pos % (60/S[d].bpm)) : 0;
   }
 }
@@ -1218,10 +1365,12 @@ function nudge(d,dir){
   var r=1+dir*.04;
   cmd(d,'setPlaybackRate',[r]);
   if(!IFRAME_AUDIO[d] && NODES[d].src) try{NODES[d].src.playbackRate.value=r;}catch(e){}
+  if(AUDIO_ELS[d]) AUDIO_ELS[d].playbackRate=r;
   setTimeout(function(){
     var base=cl(.25,2,1+(parseFloat(document.getElementById('pi'+d).value)||0)/100);
     cmd(d,'setPlaybackRate',[base]);
     if(!IFRAME_AUDIO[d] && NODES[d].src) try{NODES[d].src.playbackRate.value=base;}catch(e){}
+    if(AUDIO_ELS[d]) AUDIO_ELS[d].playbackRate=base;
   },550);
 }
 
@@ -1247,7 +1396,9 @@ function seekClick(d,e){
   var t=cl(0,S[d].dur||300,(e.clientX-r.left)/r.width*(S[d].dur||300));
   S[d]._pos=t;
   cmd(d,'seekTo',[t,true]);
-  if(!IFRAME_AUDIO[d] && S[d].on && AUDIO_BUFFERS[d]){
+  if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+    AUDIO_ELS[d].currentTime=t;
+  } else if(!IFRAME_AUDIO[d] && S[d].on && AUDIO_BUFFERS[d]){
     _startWebAudio(d,t);
   }
 }
@@ -1264,13 +1415,13 @@ function lpsz(sz,btn){
 function pitchChange(d,v){
   var p=+v, s=p>=0?'+':'';
   document.getElementById('pv'+d).textContent=s+p.toFixed(1)+'%';
-  // Update displayed BPM to reflect pitch change
   var newBpm=+(S[d].detectedBpm*(1+p/100)).toFixed(1);
   S[d].bpm=newBpm;
   document.getElementById('bpm'+d).textContent=newBpm.toFixed(1);
   var rate=cl(.25,2,1+p/100);
   cmd(d,'setPlaybackRate',[rate]);
   if(!IFRAME_AUDIO[d] && NODES[d].src) NODES[d].src.playbackRate.value=rate;
+  if(AUDIO_ELS[d]) AUDIO_ELS[d].playbackRate=rate;
   S[d]._jogSpin=rate;
 }
 
@@ -1386,10 +1537,14 @@ document.addEventListener('mouseup',function(){
   if(!JOG_DRAG.d) return;
   var d=JOG_DRAG.d;
   JOG_DRAG.scratchActive=false;
-  if(S[d].on && !IFRAME_AUDIO[d] && NODES[d].src){
-    var rate=cl(.25,2,1+(parseFloat(document.getElementById('pi'+d).value)||0)/100);
-    // Restart from scratched position
-    _startWebAudio(d, S[d]._pos);
+  if(S[d].on){
+    if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+      AUDIO_ELS[d].currentTime=S[d]._pos;
+      var base=cl(.25,2,1+(parseFloat(document.getElementById('pi'+d).value)||0)/100);
+      AUDIO_ELS[d].playbackRate=base;
+    } else if(!IFRAME_AUDIO[d] && AUDIO_BUFFERS[d]){
+      _startWebAudio(d, S[d]._pos);
+    }
   }
   JOG_DRAG.d=null;
 });
@@ -1397,8 +1552,12 @@ document.addEventListener('touchend',function(){
   if(!JOG_DRAG.d) return;
   var d=JOG_DRAG.d;
   JOG_DRAG.scratchActive=false;
-  if(S[d].on && !IFRAME_AUDIO[d] && AUDIO_BUFFERS[d]){
-    _startWebAudio(d, S[d]._pos);
+  if(S[d].on){
+    if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+      AUDIO_ELS[d].currentTime=S[d]._pos;
+    } else if(!IFRAME_AUDIO[d] && AUDIO_BUFFERS[d]){
+      _startWebAudio(d, S[d]._pos);
+    }
   }
   JOG_DRAG.d=null;
 });
@@ -1539,7 +1698,12 @@ function tick(){
     var rateMultiplier=1+pitchVal/100;
 
     if(S[d].on){
-      S[d]._pos+=dt*rateMultiplier;
+      if(AUDIO_ELS[d] && !AUDIO_BUFFERS[d]){
+        // MediaElement path — read actual position from element
+        S[d]._pos = AUDIO_ELS[d].currentTime || S[d]._pos;
+      } else {
+        S[d]._pos+=dt*rateMultiplier;
+      }
     }
     var dur=S[d].dur||240, pos=S[d]._pos;
     if(dur>0&&pos>dur){ S[d]._pos=0; pos=0; if(S[d].on){S[d].on=false;setPlayBtn(d,'▶',false);} }
