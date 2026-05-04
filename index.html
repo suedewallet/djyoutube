@@ -86,10 +86,11 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .jog-video-ph .jvp-ic{font-size:24px;color:var(--mu2)}
 .jog-video-ph .jvp-t{font-size:8px;color:var(--mu2);letter-spacing:.1em}
 .jog-overlay{position:absolute;inset:8px;border-radius:50%;pointer-events:none;z-index:3}
-/* spinning marker */
-.jog-marker{position:absolute;top:4px;left:50%;width:3px;height:14px;background:#fff;border-radius:2px;transform-origin:bottom center;transform:translateX(-50%);opacity:.7;pointer-events:none;z-index:4}
-.deck.a .jog-marker{background:var(--a)}
-.deck.b .jog-marker{background:var(--b)}
+/* spinning outer ring — only this rotates, inner video stays static */
+.jog-spin-ring{position:absolute;inset:0;border-radius:50%;pointer-events:none;z-index:7}
+.jog-marker{position:absolute;top:5px;left:50%;width:4px;height:16px;border-radius:2px;transform-origin:50% calc(80px - 5px);transform:translateX(-50%);opacity:.9;pointer-events:none;z-index:8}
+.deck.a .jog-marker{background:var(--a);box-shadow:0 0 8px var(--a)}
+.deck.b .jog-marker{background:var(--b);box-shadow:0 0 8px var(--b)}
 /* scratching overlay */
 .jog-scratch{position:absolute;inset:8px;border-radius:50%;background:radial-gradient(circle,transparent 40%,rgba(0,0,0,.3));pointer-events:none;z-index:5;opacity:0;transition:opacity .2s}
 .jog-video:active~.jog-scratch{opacity:1}
@@ -261,7 +262,9 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
         <div id="jfA"></div><!-- iframe injected here -->
       </div>
       <div class="jog-scratch"></div>
-      <div class="jog-marker" id="jmA"></div>
+      <div class="jog-spin-ring" id="jsrA">
+        <div class="jog-marker" id="jmA"></div>
+      </div>
       <div class="jog-center-dot"></div>
     </div>
   </div>
@@ -374,7 +377,9 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
         <div id="jfB"></div>
       </div>
       <div class="jog-scratch"></div>
-      <div class="jog-marker" id="jmB"></div>
+      <div class="jog-spin-ring" id="jsrB">
+        <div class="jog-marker" id="jmB"></div>
+      </div>
       <div class="jog-center-dot"></div>
     </div>
   </div>
@@ -438,51 +443,51 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 // ═══════════════════════════════════════════════════════
 // Piped is an open-source YouTube proxy with a public JSON API.
 // We rotate through instances if one is down.
+// ═══════════════════════════════════════════════════════
+// CONFIG — Invidious (search) + Piped (audio streams)
+// Both are free, open, no API key needed
+// ═══════════════════════════════════════════════════════
+var INVIDIOUS_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.privacydev.net',
+  'https://invidious.flokinet.to',
+  'https://vid.puffyan.us',
+  'https://yt.artemislena.eu',
+];
 var PIPED_INSTANCES = [
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.adminforge.de',
   'https://piped-api.privacy.com.de',
   'https://api.piped.yt',
   'https://pipedapi.in.projectsegfau.lt',
-  'https://pa.il.ax',
 ];
-var _pipedIdx = 0;
+var INVIDIOUS = INVIDIOUS_INSTANCES[0];
 var PIPED = PIPED_INSTANCES[0];
 
-// CORS proxy for when Piped instances block direct browser requests
-var CORS_PROXIES = [
-  'https://corsproxy.io/?',
-  'https://api.allorigins.win/raw?url=',
-];
-var _corsProxy = '';
-
-async function fetchWithFallback(url, opts){
-  // Try direct first
-  try{
-    var r=await fetch(url, opts||{});
-    if(r.ok) return r;
-  }catch(e){}
-  // Try CORS proxies
-  for(var i=0;i<CORS_PROXIES.length;i++){
+async function pickWorkingInstance(instances, testPath, label, statusSuffix){
+  for(var i=0;i<instances.length;i++){
     try{
-      var r2=await fetch(CORS_PROXIES[i]+encodeURIComponent(url), opts||{});
-      if(r2.ok){ _corsProxy=CORS_PROXIES[i]; return r2; }
+      var r=await fetch(instances[i]+testPath,{signal:AbortSignal.timeout(4000)});
+      if(r.ok){
+        if(label==='inv') INVIDIOUS=instances[i];
+        else PIPED=instances[i];
+        document.getElementById('pipedStatus').textContent=label+': '+instances[i].replace('https://','')+(statusSuffix||'');
+        document.getElementById('pipedStatus').style.color='var(--gr)';
+        return true;
+      }
     }catch(e){}
   }
-  throw new Error('All fetch attempts failed for: '+url);
+  return false;
 }
 
-async function pickWorkingPiped(){
-  for(var i=0;i<PIPED_INSTANCES.length;i++){
-    try{
-      var r=await fetchWithFallback(PIPED_INSTANCES[i]+'/trending?region=US');
-      if(r.ok){ PIPED=PIPED_INSTANCES[i]; document.getElementById('pipedStatus').textContent='Piped: '+PIPED.replace('https://',''); document.getElementById('pipedStatus').style.color='var(--gr)'; return; }
-    }catch(e){}
+async function initInstances(){
+  var invOk=await pickWorkingInstance(INVIDIOUS_INSTANCES,'/api/v1/trending','inv',' (search ready)');
+  if(!invOk){
+    document.getElementById('pipedStatus').textContent='Search: no instance found — paste URLs directly';
+    document.getElementById('pipedStatus').style.color='var(--ye)';
   }
-  document.getElementById('pipedStatus').textContent='Piped: all instances unreachable';
-  document.getElementById('pipedStatus').style.color='var(--re)';
 }
-pickWorkingPiped();
+initInstances();
 
 // ═══════════════════════════════════════════════════════
 // STATE
@@ -615,38 +620,49 @@ function makeDistortionCurve(amount){
 // ═══════════════════════════════════════════════════════
 // PIPED AUDIO LOADING
 // ═══════════════════════════════════════════════════════
-async function getPipedAudioUrl(videoId){
-  // Try each Piped instance
+async function getAudioUrl(videoId){
+  // Try Invidious instances for audio stream URL
+  for(var i=0;i<INVIDIOUS_INSTANCES.length;i++){
+    var inst=INVIDIOUS_INSTANCES[i];
+    try{
+      var r=await fetch(inst+'/api/v1/videos/'+videoId+'?fields=adaptiveFormats,formatStreams,title,author,lengthSeconds',{signal:AbortSignal.timeout(8000)});
+      if(!r.ok) continue;
+      var data=await r.json();
+      // adaptiveFormats has audio-only streams
+      var streams=(data.adaptiveFormats||[]).filter(function(s){return s.type&&s.type.includes('audio');});
+      // sort by bitrate
+      streams.sort(function(a,b){return (b.bitrate||0)-(a.bitrate||0);});
+      var best=streams.find(function(s){return s.type&&s.type.includes('webm');})
+               || streams.find(function(s){return s.type&&s.type.includes('mp4');})
+               || streams[0];
+      if(best && best.url){
+        return {url:best.url, duration:data.lengthSeconds||0, title:data.title||'', uploader:data.author||''};
+      }
+    }catch(e){ console.warn('Invidious audio failed:',inst,e.message); }
+  }
+  // Try Piped as fallback
   for(var i=0;i<PIPED_INSTANCES.length;i++){
     var inst=PIPED_INSTANCES[i];
     try{
-      var r=await fetchWithFallback(inst+'/streams/'+videoId);
+      var r=await fetch(inst+'/streams/'+videoId,{signal:AbortSignal.timeout(8000)});
       if(!r.ok) continue;
       var data=await r.json();
-      // audioStreams is sorted by quality; prefer opus/webm, fallback to m4a
-      var streams=data.audioStreams||[];
-      // Sort by bitrate descending
+      var streams=(data.audioStreams||[]);
       streams.sort(function(a,b){return (b.bitrate||0)-(a.bitrate||0);});
-      // Prefer webm/opus for Web Audio compatibility
-      var best=streams.find(function(s){return s.mimeType&&s.mimeType.includes('webm');})
-               || streams.find(function(s){return s.mimeType&&s.mimeType.includes('mp4');})
-               || streams[0];
+      var best=streams.find(function(s){return s.mimeType&&s.mimeType.includes('webm');})||streams[0];
       if(best && best.url){
-        PIPED=inst;
-        document.getElementById('pipedStatus').textContent='Piped: '+inst.replace('https://','');
-        document.getElementById('pipedStatus').style.color='var(--gr)';
         return {url:best.url, duration:data.duration||0, title:data.title||'', uploader:data.uploader||''};
       }
-    }catch(e){ console.warn('Piped instance failed:',inst,e.message); }
+    }catch(e){ console.warn('Piped audio failed:',inst,e.message); }
   }
-  throw new Error('All Piped instances failed');
+  throw new Error('No audio URL found from any instance');
 }
 
 async function fetchAudioAndAnalyse(d, videoId){
   if(!initAudioCtx()) return null;
   document.getElementById('wfl'+d).classList.add('show');
   try{
-    var info=await getPipedAudioUrl(videoId);
+    var info=await getAudioUrl(videoId);
 
     // Update track info if we got it from Piped
     if(info.title && document.getElementById('ttl'+d).textContent==='No track loaded'){
@@ -1071,8 +1087,9 @@ document.addEventListener('mousemove',function(e){
   var newPos=cl(0,dur,JOG_DRAG.startPos+dy*(dur/400));
   S[d]._pos=newPos;
   cmd(d,'seekTo',[newPos,true]);
-  // Visual: rotate jog angle proportionally
-  S[d]._jogAngle=S[d]._jogAngle+dy*0.5;
+  // Visual: rotate spin ring proportionally
+  S[d]._jogAngle=S[d]._jogAngle+dy*2;
+  document.getElementById('jsr'+d).style.transform='rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
   JOG_DRAG.startY=e.clientY;
   JOG_DRAG.startPos=newPos;
 });
@@ -1084,7 +1101,8 @@ document.addEventListener('touchmove',function(e){
   var newPos=cl(0,dur,JOG_DRAG.startPos+dy*(dur/400));
   S[d]._pos=newPos;
   cmd(d,'seekTo',[newPos,true]);
-  S[d]._jogAngle+=dy*0.5;
+  S[d]._jogAngle+=dy*2;
+  document.getElementById('jsr'+d).style.transform='rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
   JOG_DRAG.startY=e.touches[0].clientY;
   JOG_DRAG.startPos=newPos;
 },{passive:true});
@@ -1148,30 +1166,34 @@ async function doSearch(){
   var res=document.getElementById('srRes');
   res.innerHTML='<div style="padding:10px;font-size:9px;color:var(--mu);text-align:center;letter-spacing:.1em">SEARCHING...</div>';
   res.classList.add('show');
-  try{
-    // Piped search — no API key needed
-    var r=await fetchWithFallback(PIPED+'/search?q='+encodeURIComponent(q)+'&filter=videos');
-    if(!r.ok) throw new Error('Piped search returned '+r.status);
-    var data=await r.json();
-    var items=(data.items||[]).filter(function(i){return i.url&&i.url.includes('watch');}).slice(0,8);
-    if(!items.length){ res.innerHTML='<div style="padding:10px;font-size:9px;color:var(--mu);text-align:center">No results</div>'; return; }
-    res.innerHTML='';
-    items.forEach(function(item){
-      var vid=item.url.split('v=')[1]||item.url.split('/').pop();
-      if(vid&&vid.includes('&')) vid=vid.split('&')[0];
-      var title=item.title||'Unknown';
-      var ch=item.uploaderName||'';
-      var thumb=item.thumbnail||('https://i.ytimg.com/vi/'+vid+'/default.jpg');
-      var dur=item.duration>0?Math.floor(item.duration/60)+':'+(item.duration%60<10?'0':'')+item.duration%60:'';
-      var el=document.createElement('div'); el.className='sri';
-      el.innerHTML='<img class="sri-th" src="'+thumb+'" loading="lazy"/>'
-        +'<div class="sri-inf"><div class="sri-t">'+esc(title)+'</div>'
-        +'<div class="sri-c">'+esc(ch)+(dur?' · '+dur:'')+'</div></div>'
-        +'<div class="sri-btns"><button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'A\',event)">▸A</button>'
-        +'<button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'B\',event)">▸B</button></div>';
-      res.appendChild(el);
-    });
-  }catch(e){ res.innerHTML='<div style="padding:10px;font-size:9px;color:var(--re);text-align:center">Search failed: '+esc(e.message)+'</div>'; }
+  // Try each Invidious instance
+  for(var i=0;i<INVIDIOUS_INSTANCES.length;i++){
+    try{
+      var r=await fetch(INVIDIOUS_INSTANCES[i]+'/api/v1/search?q='+encodeURIComponent(q)+'&type=video&fields=videoId,title,author,lengthSeconds,videoThumbnails',{signal:AbortSignal.timeout(6000)});
+      if(!r.ok) continue;
+      var items=await r.json();
+      if(!items||!items.length) continue;
+      INVIDIOUS=INVIDIOUS_INSTANCES[i];
+      res.innerHTML='';
+      items.slice(0,8).forEach(function(item){
+        var vid=item.videoId, title=item.title||'Unknown', ch=item.author||'';
+        var dur=item.lengthSeconds>0?Math.floor(item.lengthSeconds/60)+':'+(item.lengthSeconds%60<10?'0':'')+item.lengthSeconds%60:'';
+        var thumbs=item.videoThumbnails||[];
+        var thumb=thumbs.find(function(t){return t.quality==='medium';})||thumbs[0];
+        var thumbUrl=thumb?thumb.url:('https://i.ytimg.com/vi/'+vid+'/mqdefault.jpg');
+        if(thumbUrl&&thumbUrl.startsWith('/')) thumbUrl=INVIDIOUS_INSTANCES[i]+thumbUrl;
+        var el=document.createElement('div'); el.className='sri';
+        el.innerHTML='<img class="sri-th" src="'+thumbUrl+'" loading="lazy" onerror="this.src=\'https://i.ytimg.com/vi/'+vid+'/default.jpg\'"/>'
+          +'<div class="sri-inf"><div class="sri-t">'+esc(title)+'</div>'
+          +'<div class="sri-c">'+esc(ch)+(dur?' · '+dur:'')+'</div></div>'
+          +'<div class="sri-btns"><button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'A\',event)">▸A</button>'
+          +'<button onclick="pickDeck(\''+vid+'\',\''+esc(title)+'\',\''+esc(ch)+'\',\'B\',event)">▸B</button></div>';
+        res.appendChild(el);
+      });
+      return;
+    }catch(e){ console.warn('Invidious search failed:',INVIDIOUS_INSTANCES[i],e.message); }
+  }
+  res.innerHTML='<div style="padding:10px;font-size:9px;color:var(--re);text-align:center">Search unavailable — paste a YouTube URL directly into the deck</div>';
 }
 function pickDeck(vid,title,ch,d,e){ if(e)e.stopPropagation(); loadById(d,vid,title,ch); document.getElementById('srRes').classList.remove('show'); document.getElementById('searchQ').value=''; }
 function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -1229,11 +1251,9 @@ function tick(){
     document.getElementById('phb'+d).style.left=(pct*100).toFixed(2)+'%';
     document.getElementById('wt'+d).textContent=fmt(pos)+' / '+fmt(dur);
 
-    // Jogwheel rotation
-    if(S[d].on) S[d]._jogAngle+=(dt*S[d].bpm/60)*360; // one rotation per beat
-    var jv=document.getElementById('jv'+d);
-    jv.style.transform='rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
-    document.getElementById('jm'+d).style.transform='translateX(-50%) rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
+    // Jogwheel rotation — only the outer spin ring rotates, video stays static
+    if(S[d].on) S[d]._jogAngle+=(dt*S[d].bpm/60)*360; // one full rotation per beat
+    document.getElementById('jsr'+d).style.transform='rotate('+S[d]._jogAngle.toFixed(1)+'deg)';
 
     // VU meter
     var lv;
