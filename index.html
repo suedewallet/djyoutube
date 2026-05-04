@@ -443,14 +443,39 @@ var PIPED_INSTANCES = [
   'https://pipedapi.adminforge.de',
   'https://piped-api.privacy.com.de',
   'https://api.piped.yt',
+  'https://pipedapi.in.projectsegfau.lt',
+  'https://pa.il.ax',
 ];
 var _pipedIdx = 0;
 var PIPED = PIPED_INSTANCES[0];
 
+// CORS proxy for when Piped instances block direct browser requests
+var CORS_PROXIES = [
+  'https://corsproxy.io/?',
+  'https://api.allorigins.win/raw?url=',
+];
+var _corsProxy = '';
+
+async function fetchWithFallback(url, opts){
+  // Try direct first
+  try{
+    var r=await fetch(url, opts||{});
+    if(r.ok) return r;
+  }catch(e){}
+  // Try CORS proxies
+  for(var i=0;i<CORS_PROXIES.length;i++){
+    try{
+      var r2=await fetch(CORS_PROXIES[i]+encodeURIComponent(url), opts||{});
+      if(r2.ok){ _corsProxy=CORS_PROXIES[i]; return r2; }
+    }catch(e){}
+  }
+  throw new Error('All fetch attempts failed for: '+url);
+}
+
 async function pickWorkingPiped(){
   for(var i=0;i<PIPED_INSTANCES.length;i++){
     try{
-      var r=await fetch(PIPED_INSTANCES[i]+'/trending?region=US',{signal:AbortSignal.timeout(4000)});
+      var r=await fetchWithFallback(PIPED_INSTANCES[i]+'/trending?region=US');
       if(r.ok){ PIPED=PIPED_INSTANCES[i]; document.getElementById('pipedStatus').textContent='Piped: '+PIPED.replace('https://',''); document.getElementById('pipedStatus').style.color='var(--gr)'; return; }
     }catch(e){}
   }
@@ -595,7 +620,7 @@ async function getPipedAudioUrl(videoId){
   for(var i=0;i<PIPED_INSTANCES.length;i++){
     var inst=PIPED_INSTANCES[i];
     try{
-      var r=await fetch(inst+'/streams/'+videoId,{signal:AbortSignal.timeout(8000)});
+      var r=await fetchWithFallback(inst+'/streams/'+videoId);
       if(!r.ok) continue;
       var data=await r.json();
       // audioStreams is sorted by quality; prefer opus/webm, fallback to m4a
@@ -1125,7 +1150,7 @@ async function doSearch(){
   res.classList.add('show');
   try{
     // Piped search — no API key needed
-    var r=await fetch(PIPED+'/search?q='+encodeURIComponent(q)+'&filter=videos');
+    var r=await fetchWithFallback(PIPED+'/search?q='+encodeURIComponent(q)+'&filter=videos');
     if(!r.ok) throw new Error('Piped search returned '+r.status);
     var data=await r.json();
     var items=(data.items||[]).filter(function(i){return i.url&&i.url.includes('watch');}).slice(0,8);
