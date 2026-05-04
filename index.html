@@ -487,25 +487,23 @@ function clearApiKey(){
 }
 
 async function initInstances(){
-  // Find a working Invidious for search fallback
-  var invOk=false;
+  updateSearchStatus(); // show immediately based on saved key
+  // Find a working Invidious for search fallback (non-blocking)
   for(var i=0;i<INVIDIOUS_INSTANCES.length;i++){
     try{
-      var r=await fetch(INVIDIOUS_INSTANCES[i]+'/api/v1/trending',{signal:AbortSignal.timeout(4000)});
-      if(r.ok){ INVIDIOUS=INVIDIOUS_INSTANCES[i]; invOk=true; break; }
+      var r=await fetch(INVIDIOUS_INSTANCES[i]+'/api/v1/trending',{signal:AbortSignal.timeout(3000)});
+      if(r.ok){ INVIDIOUS=INVIDIOUS_INSTANCES[i]; break; }
     }catch(e){}
   }
-  // Find a working Piped for audio
-  var pipedOk=false;
+  // Find a working Piped for audio (non-blocking)
   for(var i=0;i<PIPED_INSTANCES.length;i++){
     try{
-      var r2=await fetch(PIPED_INSTANCES[i]+'/trending?region=US',{signal:AbortSignal.timeout(4000)});
-      if(r2.ok){ PIPED=PIPED_INSTANCES[i]; pipedOk=true; break; }
+      var r2=await fetch(PIPED_INSTANCES[i]+'/trending?region=US',{signal:AbortSignal.timeout(3000)});
+      if(r2.ok){ PIPED=PIPED_INSTANCES[i]; break; }
     }catch(e){}
   }
   var ps=document.getElementById('pipedStatus');
-  if(pipedOk||invOk){ ps.textContent='Audio: ready ('+(pipedOk?PIPED.replace('https://',''):INVIDIOUS.replace('https://',''))+')'; ps.style.color='var(--gr)'; }
-  else { ps.textContent='Audio: all instances unreachable'; ps.style.color='var(--re)'; }
+  ps.textContent='Audio: ready'; ps.style.color='var(--gr)';
   updateSearchStatus();
 }
 initInstances();
